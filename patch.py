@@ -114,6 +114,10 @@ def _register_custom_queues():
 def apply_patch():
     global _original_enqueue, _original_get_queue
 
+    if _original_enqueue is not None:
+        logger.debug("Script router patch already applied, skipping")
+        return
+
     _register_custom_queues()
 
     _original_enqueue = Job.enqueue
