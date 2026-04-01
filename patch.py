@@ -72,7 +72,7 @@ def _get_script_class(instance, script_name):
     try:
         from extras.models import Script as ScriptModel
         if hasattr(ScriptModel, 'python_class') and isinstance(instance, ScriptModel):
-            return instance.python_class()
+            return instance.python_class
     except ImportError:
         pass
 
