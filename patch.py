@@ -1,105 +1,124 @@
 """
 Monkey-patch de Job.enqueue pour router les scripts NetBox
 vers des workers RQ dédiés via l'attribut Meta.queue.
+
+Compatible NetBox 3.7.x et 4.0+.
+Thread-safe grâce à contextvars.
 """
 
+import contextvars
 import logging
 
-import django_rq
-from django.conf import settings
-
 from core.models import Job
-from utilities.rqworker import get_queue_for_model
+import utilities.rqworker as rqworker
 
 logger = logging.getLogger('netbox_script_router')
 
-# Sauvegarde de l'original
-_original_enqueue = Job.enqueue
+_queue_override = contextvars.ContextVar('script_router_queue', default=None)
+_original_enqueue = None
+_original_get_queue = None
 
 
 @classmethod
 def _patched_enqueue(cls, func, instance, name='', user=None, schedule_at=None, interval=None, **kwargs):
-    """
-    Wrapper autour de Job.enqueue qui redirige les scripts
-    ayant Meta.queue vers le worker RQ correspondant.
-    """
-    queue_override = _get_script_queue(instance, name)
+    queue_name = _resolve_queue(instance, name)
 
-    if queue_override:
-        # Patch temporaire de get_queue_for_model pour forcer la queue
-        import utilities.rqworker as rqworker
-        original_get_queue = rqworker.get_queue_for_model
-
-        rqworker.get_queue_for_model = lambda *a, **kw: queue_override
+    if queue_name:
+        token = _queue_override.set(queue_name)
         try:
-            return _original_enqueue.__func__(cls, func, instance, name=name, user=user,
-                                              schedule_at=schedule_at, interval=interval, **kwargs)
+            return _original_enqueue.__func__(
+                cls, func, instance, name=name, user=user,
+                schedule_at=schedule_at, interval=interval, **kwargs,
+            )
         finally:
-            rqworker.get_queue_for_model = original_get_queue
-    else:
-        return _original_enqueue.__func__(cls, func, instance, name=name, user=user,
-                                          schedule_at=schedule_at, interval=interval, **kwargs)
+            _queue_override.reset(token)
+
+    return _original_enqueue.__func__(
+        cls, func, instance, name=name, user=user,
+        schedule_at=schedule_at, interval=interval, **kwargs,
+    )
 
 
-def _get_script_queue(instance, script_name):
+def _patched_get_queue_for_model(model):
+    override = _queue_override.get()
+    if override:
+        return override
+    return _original_get_queue(model)
+
+
+def _resolve_queue(instance, script_name):
     """
-    Si instance est un ScriptModule et que le script a Meta.queue, retourne le nom de la queue.
-    Sinon retourne None (= comportement par défaut).
+    Extrait Meta.queue depuis la classe de script associée à l'instance.
+    Gère ScriptModule (NetBox 3.7.x) et Script model (NetBox 4.0+).
     """
     try:
-        from extras.scripts import Script
-        from extras.models import ScriptModule
-
-        if not isinstance(instance, ScriptModule):
-            return None
-
-        scripts = instance.scripts
-
-        # Tentative directe avec le nom fourni
-        script_cls = scripts.get(script_name)
-
-        # Fallback : chercher par suffixe (le name peut être "module.ClassName" ou "ClassName")
-        if script_cls is None and script_name:
-            for key, cls in scripts.items():
-                if key == script_name.split('.')[-1] or script_name.endswith(key):
-                    script_cls = cls
-                    break
-
+        script_cls = _get_script_class(instance, script_name)
         if script_cls is None:
             return None
 
         queue = getattr(getattr(script_cls, 'Meta', None), 'queue', None)
         if queue:
-            logger.info(f"Script '{script_name}' routed to queue '{queue}'")
+            logger.info("Script '%s' routed to queue '%s'", script_name, queue)
             return queue
 
     except Exception as e:
-        logger.warning(f"Script router: error resolving queue for '{script_name}': {e}")
+        logger.warning("Script router: error resolving queue for '%s': %s", script_name, e)
 
     return None
 
 
-def _register_custom_queues():
-    """
-    Enregistre les queues custom dans RQ_QUEUES de Django
-    en réutilisant les paramètres de connexion de la queue 'default'.
-    """
-    custom_queues = getattr(settings, 'PLUGINS_CONFIG', {}).get('netbox_script_router', {}).get('queues', [])
+def _get_script_class(instance, script_name):
+    # NetBox 4.0+ : extras.models.Script (modèle DB avec python_class())
+    try:
+        from extras.models import Script as ScriptModel
+        if hasattr(ScriptModel, 'python_class') and isinstance(instance, ScriptModel):
+            return instance.python_class()
+    except ImportError:
+        pass
 
+    # NetBox 3.7.x : extras.models.ScriptModule
+    try:
+        from extras.models import ScriptModule
+        if not isinstance(instance, ScriptModule):
+            return None
+
+        scripts = instance.scripts
+        script_cls = scripts.get(script_name)
+
+        # Fallback : "module.ClassName" -> "ClassName"
+        if script_cls is None and script_name:
+            suffix = script_name.rsplit('.', 1)[-1]
+            script_cls = scripts.get(suffix)
+
+        return script_cls
+    except ImportError:
+        return None
+
+
+def _register_custom_queues():
+    from django.conf import settings
+
+    custom_queues = settings.PLUGINS_CONFIG.get('netbox_script_router', {}).get('queues', [])
     if not custom_queues:
         return
 
     rq_queues = getattr(settings, 'RQ_QUEUES', {})
-    # Copier les params de connexion depuis la queue 'default'
     default_params = rq_queues.get('default', {})
 
     for queue_name in custom_queues:
         if queue_name not in rq_queues:
             rq_queues[queue_name] = default_params.copy()
-            logger.info(f"Registered RQ queue '{queue_name}'")
+            logger.info("Registered RQ queue '%s'", queue_name)
 
 
 def apply_patch():
+    global _original_enqueue, _original_get_queue
+
     _register_custom_queues()
+
+    _original_enqueue = Job.enqueue
+    _original_get_queue = rqworker.get_queue_for_model
+
+    rqworker.get_queue_for_model = _patched_get_queue_for_model
     Job.enqueue = _patched_enqueue
     logger.info("Job.enqueue patched for script routing")

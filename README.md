@@ -1,11 +1,11 @@
 # netbox-script-router
 
-Plugin NetBox 3.7.8 — Route les scripts vers des workers RQ dédiés via `Meta.queue`.
+Plugin NetBox (compatible 3.7.x et 4.0+) — Route les scripts vers des workers RQ dedies via `Meta.queue`.
 
 ## Installation
 
 ```bash
-pip install ./netbox-script-router
+pip install -e ./netbox-script-router
 ```
 
 Dans `configuration.py` :
@@ -22,7 +22,7 @@ PLUGINS_CONFIG = {
 
 ## Utilisation
 
-Ajouter `queue` dans la classe `Meta` des scripts à router :
+Ajouter `queue` dans la classe `Meta` des scripts a router :
 
 ```python
 from extras.scripts import Script
@@ -41,7 +41,7 @@ Les scripts sans `Meta.queue` restent sur le worker `default`.
 ## Lancer les workers
 
 ```bash
-# Worker dédié myworker
+# Worker dedie myworker
 python manage.py rqworker myworker
 
 # Worker pour le reste

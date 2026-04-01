@@ -5,9 +5,12 @@ class ScriptRouterConfig(PluginConfig):
     name = 'netbox_script_router'
     verbose_name = 'Script Router'
     description = 'Route NetBox scripts to dedicated RQ workers via Meta.queue'
-    version = '1.0.0'
+    version = '1.1.0'
     author = 'Romain'
     base_url = 'script-router'
+    default_settings = {
+        'queues': [],
+    }
 
     def ready(self):
         super().ready()
